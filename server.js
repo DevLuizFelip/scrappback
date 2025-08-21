@@ -27,26 +27,57 @@ app.use(express.json());
 const cache = new Map();
 const CACHE_DURATION_MS = 15 * 60 * 1000;
 
-// --- Endpoints da API (sem alterações) ---
+// --- Endpoints da API ---
 app.get('/api/sources', async (req, res) => {
     await db.read();
     res.json(db.data.sources);
 });
+
+// LÓGICA ATUALIZADA AQUI
 app.delete('/api/sources/:id', async (req, res) => {
     const { id } = req.params;
     await db.read();
+
     const sourceToRemove = db.data.sources.find(s => s.id === id);
     if (!sourceToRemove) {
         return res.status(404).json({ message: 'Fonte não encontrada.' });
     }
+
+    // 1. Remove a fonte da lista de fontes
     db.data.sources = db.data.sources.filter(source => source.id !== id);
-    const imagesToRemoveIds = new Set(db.data.images.filter(img => img.sourceId === id).map(img => img.id));
-    db.data.images = db.data.images.filter(image => image.sourceId !== id);
-    db.data.favorites = db.data.favorites.filter(favId => !imagesToRemoveIds.has(favId));
-    await db.write();
+
+    // 2. Processa as imagens: mantém as favoritas e remove as outras
+    const favoriteSet = new Set(db.data.favorites);
+    const updatedImages = [];
+
+    for (const image of db.data.images) {
+        if (image.sourceId === id) {
+            // Se a imagem pertence à fonte removida, verifica se é favorita
+            if (favoriteSet.has(image.id)) {
+                // Se for favorita, mantém a imagem mas atualiza-a para a desvincular
+                updatedImages.push({
+                    ...image,
+                    sourceId: null, // Desvincula da fonte
+                    source: `(Arquivado) ${image.source}` // Indica que a fonte foi removida
+                });
+            }
+            // Se não for favorita, ela é simplesmente ignorada (removida)
+        } else {
+            // Se a imagem não pertence à fonte removida, mantém-na como está
+            updatedImages.push(image);
+        }
+    }
+    db.data.images = updatedImages;
+    
+    // O array de favoritos permanece intacto, pois não removemos nenhuma imagem favorita.
+
+    await db.write(); // Guarda as alterações no ficheiro
+
     if (sourceToRemove.url) cache.delete(sourceToRemove.url);
-    res.status(200).json({ success: true, message: 'Fonte e imagens removidas com sucesso.' });
+
+    res.status(200).json({ success: true, message: 'Fonte removida. Imagens favoritas foram mantidas.' });
 });
+
 app.get('/api/images', async (req, res) => {
     await db.read();
     const { images, favorites } = db.data;
@@ -122,7 +153,6 @@ app.post('/api/images/scrape', async (req, res) => {
 
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
-        // MELHORIA: Lógica de scroll infinito inteligente
         await page.evaluate(async () => {
             await new Promise((resolve) => {
                 let totalHeight = 0;
@@ -136,7 +166,6 @@ app.post('/api/images/scrape', async (req, res) => {
                     totalHeight += distance;
                     scrolls++;
 
-                    // Se a altura da página não aumentar depois de rolar, ou se atingirmos o limite de scrolls, paramos.
                     if (totalHeight >= scrollHeight - window.innerHeight || scrolls >= maxScrolls) {
                         clearInterval(timer);
                         resolve();
@@ -149,7 +178,6 @@ app.post('/api/images/scrape', async (req, res) => {
             const images = Array.from(document.querySelectorAll('img'));
             const uniqueUrls = new Set();
             for (const img of images) {
-                // Filtro um pouco mais flexível para apanhar mais imagens
                 if (img.naturalWidth > 100 && img.naturalHeight > 100) {
                     uniqueUrls.add(img.src);
                 }
