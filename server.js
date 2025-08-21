@@ -1,9 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core'); // Alterado para puppeteer-core
+const chromium = require('chrome-aws-lambda'); // Nova dependência
 const axios = require('axios');
-const { join, dirname } = require('path');
+const { join } = require('path');
 const { Low } = require('lowdb');
 const { JSONFile } = require('lowdb/node');
 
@@ -13,64 +14,51 @@ const PORT = process.env.PORT || 3001;
 // --- Configuração da Base de Dados Persistente (lowdb) ---
 const file = join(__dirname, 'db.json');
 const adapter = new JSONFile(file);
-const db = new Low(adapter, { sources: [], images: [], favorites: [] }); // Dados padrão
+const db = new Low(adapter, { sources: [], images: [], favorites: [] });
 
+// --- CORS de Produção ---
 const corsOptions = {
-  origin: 'https://scrappfront.vercel.app' // O URL que a Vercel lhe deu!
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000'
 };
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// --- Cache em Memória (continua a ser útil para performance) ---
+// --- Cache em Memória ---
 const cache = new Map();
-const CACHE_DURATION_MS = 15 * 60 * 1000; // 15 minutos
+const CACHE_DURATION_MS = 15 * 60 * 1000;
 
 // --- Endpoints da API ---
-
 app.get('/api/sources', async (req, res) => {
-    await db.read(); // Lê os dados mais recentes do ficheiro
+    await db.read();
     res.json(db.data.sources);
 });
-
 app.delete('/api/sources/:id', async (req, res) => {
     const { id } = req.params;
     await db.read();
-
     const sourceToRemove = db.data.sources.find(s => s.id === id);
     if (!sourceToRemove) {
         return res.status(404).json({ message: 'Fonte não encontrada.' });
     }
-
-    // Remove a fonte e as suas imagens
     db.data.sources = db.data.sources.filter(source => source.id !== id);
     const imagesToRemoveIds = new Set(db.data.images.filter(img => img.sourceId === id).map(img => img.id));
     db.data.images = db.data.images.filter(image => image.sourceId !== id);
     db.data.favorites = db.data.favorites.filter(favId => !imagesToRemoveIds.has(favId));
-    
-    await db.write(); // Guarda as alterações no ficheiro
-
+    await db.write();
     if (sourceToRemove.url) cache.delete(sourceToRemove.url);
-
     res.status(200).json({ success: true, message: 'Fonte e imagens removidas com sucesso.' });
 });
-
 app.get('/api/images', async (req, res) => {
     await db.read();
     const { images, favorites } = db.data;
     const favoriteSet = new Set(favorites);
-    const imagesWithFavorites = images.map(img => ({
-        ...img,
-        isFavorited: favoriteSet.has(img.id)
-    }));
+    const imagesWithFavorites = images.map(img => ({ ...img, isFavorited: favoriteSet.has(img.id) }));
     res.json(imagesWithFavorites);
 });
-
 app.post('/api/favorites', async (req, res) => {
     const { imageId, favorite } = req.body;
     if (typeof imageId === 'undefined' || typeof favorite === 'undefined') {
         return res.status(400).json({ message: 'imageId e favorite são obrigatórios.' });
     }
-    
     await db.read();
     const favoriteSet = new Set(db.data.favorites);
     if (favorite) {
@@ -80,21 +68,15 @@ app.post('/api/favorites', async (req, res) => {
     }
     db.data.favorites = Array.from(favoriteSet);
     await db.write();
-
     res.status(200).json({ success: true, favorites: db.data.favorites });
 });
-
 app.get('/api/download', async (req, res) => {
     const { url } = req.query;
     if (!url) {
         return res.status(400).json({ message: 'URL da imagem é obrigatória.' });
     }
     try {
-        const response = await axios({
-            method: 'GET',
-            url: url,
-            responseType: 'stream'
-        });
+        const response = await axios({ method: 'GET', url: url, responseType: 'stream' });
         res.setHeader('Content-Disposition', 'attachment; filename="image.jpg"');
         response.data.pipe(res);
     } catch (error) {
@@ -119,15 +101,18 @@ app.post('/api/images/scrape', async (req, res) => {
 
     let browser = null;
     try {
+        // CORREÇÃO: Usar o executável do chrome-aws-lambda
         browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            protocolTimeout: 90000 
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath,
+            headless: chromium.headless,
+            ignoreHTTPSErrors: true,
         });
-        const page = await browser.newPage();
-        page.setDefaultNavigationTimeout(90000);
-        page.setDefaultTimeout(90000);
 
+        const page = await browser.newPage();
+        
+        // Otimizações de performance (bloquear recursos desnecessários)
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (['stylesheet', 'font', 'script', 'other'].includes(req.resourceType())) {
@@ -137,9 +122,7 @@ app.post('/api/images/scrape', async (req, res) => {
             }
         });
 
-        await page.setViewport({ width: 1280, height: 800 });
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
         await page.evaluate(async () => {
             await new Promise((resolve) => {
@@ -185,7 +168,7 @@ app.post('/api/images/scrape', async (req, res) => {
             sourceId: newSource.id
         }));
 
-        db.data.images.unshift(...newImages); // Adiciona no início
+        db.data.images.unshift(...newImages);
         await db.write();
 
         const responseData = { newSource, newImages };
@@ -205,7 +188,7 @@ app.post('/api/images/scrape', async (req, res) => {
 
 // Inicia o servidor
 app.listen(PORT, async () => {
-    await db.read(); // Carrega a base de dados ao iniciar
+    await db.read();
     console.log(`Servidor backend a correr em http://localhost:${PORT}`);
     console.log(`Base de dados carregada a partir de: ${file}`);
 });
