@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium'); // Alterado para @sparticuz/chromium
+const chromium = require('@sparticuz/chromium');
 const axios = require('axios');
 const { join } = require('path');
 const { Low } = require('lowdb');
@@ -17,6 +17,7 @@ const adapter = new JSONFile(file);
 const db = new Low(adapter, { sources: [], images: [], favorites: [] });
 
 // --- CORS de Produção ---
+// CORREÇÃO DEFINITIVA: Usa a variável de ambiente que configurou no Render
 const corsOptions = {
   origin: process.env.FRONTEND_URL || 'http://localhost:3000'
 };
@@ -101,11 +102,10 @@ app.post('/api/images/scrape', async (req, res) => {
 
     let browser = null;
     try {
-        // CORREÇÃO: Usar o executável do @sparticuz/chromium
         browser = await puppeteer.launch({
             args: chromium.args,
             defaultViewport: chromium.defaultViewport,
-            executablePath: await chromium.executablePath(), // Alterado para uma função
+            executablePath: await chromium.executablePath(),
             headless: chromium.headless,
             ignoreHTTPSErrors: true,
         });
