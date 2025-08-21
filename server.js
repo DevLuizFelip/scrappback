@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
-const puppeteer = require('puppeteer-core'); // Alterado para puppeteer-core
-const chromium = require('chrome-aws-lambda'); // Nova dependência
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium'); // Alterado para @sparticuz/chromium
 const axios = require('axios');
 const { join } = require('path');
 const { Low } = require('lowdb');
@@ -101,18 +101,17 @@ app.post('/api/images/scrape', async (req, res) => {
 
     let browser = null;
     try {
-        // CORREÇÃO: Usar o executável do chrome-aws-lambda
+        // CORREÇÃO: Usar o executável do @sparticuz/chromium
         browser = await puppeteer.launch({
             args: chromium.args,
             defaultViewport: chromium.defaultViewport,
-            executablePath: await chromium.executablePath,
+            executablePath: await chromium.executablePath(), // Alterado para uma função
             headless: chromium.headless,
             ignoreHTTPSErrors: true,
         });
 
         const page = await browser.newPage();
         
-        // Otimizações de performance (bloquear recursos desnecessários)
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             if (['stylesheet', 'font', 'script', 'other'].includes(req.resourceType())) {

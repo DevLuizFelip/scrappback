@@ -1,7 +1,7 @@
 {
   "dependencies": {
+    "@sparticuz/chromium": "^138.0.2",
     "axios": "^1.11.0",
-    "chrome-aws-lambda": "^10.1.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "lowdb": "^7.0.1",
