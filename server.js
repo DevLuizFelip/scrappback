@@ -16,7 +16,7 @@ const adapter = new JSONFile(file);
 const db = new Low(adapter, { sources: [], images: [], favorites: [] }); // Dados padrão
 
 const corsOptions = {
-  origin: 'https://seu-frontend-url.vercel.app' // O URL que a Vercel lhe deu!
+  origin: 'https://scrappfront.vercel.app' // O URL que a Vercel lhe deu!
 };
 app.use(cors(corsOptions));
 app.use(express.json());
