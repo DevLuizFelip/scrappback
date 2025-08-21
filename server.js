@@ -32,52 +32,30 @@ app.get('/api/sources', async (req, res) => {
     await db.read();
     res.json(db.data.sources);
 });
-
-// LÓGICA ATUALIZADA AQUI
 app.delete('/api/sources/:id', async (req, res) => {
     const { id } = req.params;
     await db.read();
-
     const sourceToRemove = db.data.sources.find(s => s.id === id);
     if (!sourceToRemove) {
         return res.status(404).json({ message: 'Fonte não encontrada.' });
     }
-
-    // 1. Remove a fonte da lista de fontes
     db.data.sources = db.data.sources.filter(source => source.id !== id);
-
-    // 2. Processa as imagens: mantém as favoritas e remove as outras
     const favoriteSet = new Set(db.data.favorites);
     const updatedImages = [];
-
     for (const image of db.data.images) {
         if (image.sourceId === id) {
-            // Se a imagem pertence à fonte removida, verifica se é favorita
             if (favoriteSet.has(image.id)) {
-                // Se for favorita, mantém a imagem mas atualiza-a para a desvincular
-                updatedImages.push({
-                    ...image,
-                    sourceId: null, // Desvincula da fonte
-                    source: `(Arquivado) ${image.source}` // Indica que a fonte foi removida
-                });
+                updatedImages.push({ ...image, sourceId: null, source: `(Arquivado) ${image.source}` });
             }
-            // Se não for favorita, ela é simplesmente ignorada (removida)
         } else {
-            // Se a imagem não pertence à fonte removida, mantém-na como está
             updatedImages.push(image);
         }
     }
     db.data.images = updatedImages;
-    
-    // O array de favoritos permanece intacto, pois não removemos nenhuma imagem favorita.
-
-    await db.write(); // Guarda as alterações no ficheiro
-
+    await db.write();
     if (sourceToRemove.url) cache.delete(sourceToRemove.url);
-
     res.status(200).json({ success: true, message: 'Fonte removida. Imagens favoritas foram mantidas.' });
 });
-
 app.get('/api/images', async (req, res) => {
     await db.read();
     const { images, favorites } = db.data;
@@ -153,24 +131,26 @@ app.post('/api/images/scrape', async (req, res) => {
 
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
+        // MELHORIA DEFINITIVA: Lógica de scroll infinito robusta
         await page.evaluate(async () => {
             await new Promise((resolve) => {
-                let totalHeight = 0;
-                let distance = 200;
-                let maxScrolls = 20; // Limite para evitar loops infinitos
+                let lastHeight = 0;
                 let scrolls = 0;
+                const maxScrolls = 25; // Limite para evitar loops infinitos em sites muito grandes
+                const scrollInterval = setInterval(() => {
+                    const scrollHeight = document.body.scrollHeight;
+                    window.scrollTo(0, scrollHeight);
+                    const newHeight = document.body.scrollHeight;
 
-                const timer = setInterval(() => {
-                    let scrollHeight = document.body.scrollHeight;
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-                    scrolls++;
-
-                    if (totalHeight >= scrollHeight - window.innerHeight || scrolls >= maxScrolls) {
-                        clearInterval(timer);
+                    // Se a altura não mudou depois de rolar, consideramos que chegámos ao fim
+                    if (newHeight === lastHeight || scrolls >= maxScrolls) {
+                        clearInterval(scrollInterval);
                         resolve();
+                    } else {
+                        lastHeight = newHeight;
+                        scrolls++;
                     }
-                }, 2000); // Espera 2 segundos entre cada scroll para permitir o carregamento de novo conteúdo
+                }, 2000); // Espera 2 segundos entre cada scroll
             });
         });
 
