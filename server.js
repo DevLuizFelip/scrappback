@@ -17,7 +17,6 @@ const adapter = new JSONFile(file);
 const db = new Low(adapter, { sources: [], images: [], favorites: [] });
 
 // --- CORS de Produção ---
-// CORREÇÃO DEFINITIVA: Usa a variável de ambiente que configurou no Render
 const corsOptions = {
   origin: process.env.FRONTEND_URL || 'http://localhost:3000'
 };
@@ -28,7 +27,7 @@ app.use(express.json());
 const cache = new Map();
 const CACHE_DURATION_MS = 15 * 60 * 1000;
 
-// --- Endpoints da API ---
+// --- Endpoints da API (sem alterações) ---
 app.get('/api/sources', async (req, res) => {
     await db.read();
     res.json(db.data.sources);
@@ -123,19 +122,26 @@ app.post('/api/images/scrape', async (req, res) => {
 
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
+        // MELHORIA: Lógica de scroll infinito inteligente
         await page.evaluate(async () => {
             await new Promise((resolve) => {
                 let totalHeight = 0;
-                const distance = 100;
+                let distance = 200;
+                let maxScrolls = 20; // Limite para evitar loops infinitos
+                let scrolls = 0;
+
                 const timer = setInterval(() => {
-                    const scrollHeight = document.body.scrollHeight;
+                    let scrollHeight = document.body.scrollHeight;
                     window.scrollBy(0, distance);
                     totalHeight += distance;
-                    if (totalHeight >= scrollHeight - window.innerHeight) {
+                    scrolls++;
+
+                    // Se a altura da página não aumentar depois de rolar, ou se atingirmos o limite de scrolls, paramos.
+                    if (totalHeight >= scrollHeight - window.innerHeight || scrolls >= maxScrolls) {
                         clearInterval(timer);
                         resolve();
                     }
-                }, 100);
+                }, 2000); // Espera 2 segundos entre cada scroll para permitir o carregamento de novo conteúdo
             });
         });
 
@@ -143,7 +149,8 @@ app.post('/api/images/scrape', async (req, res) => {
             const images = Array.from(document.querySelectorAll('img'));
             const uniqueUrls = new Set();
             for (const img of images) {
-                if (img.naturalWidth > 150 && img.naturalHeight > 150) {
+                // Filtro um pouco mais flexível para apanhar mais imagens
+                if (img.naturalWidth > 100 && img.naturalHeight > 100) {
                     uniqueUrls.add(img.src);
                 }
             }
