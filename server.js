@@ -27,6 +27,68 @@ app.use(express.json());
 const cache = new Map();
 const CACHE_DURATION_MS = 15 * 60 * 1000;
 
+// --- Função Helper para Scraping (para evitar repetição de código) ---
+const scrapeUrl = async (url) => {
+    let browser = null;
+    try {
+        browser = await puppeteer.launch({
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath(),
+            headless: chromium.headless,
+            ignoreHTTPSErrors: true,
+        });
+
+        const page = await browser.newPage();
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            if (['stylesheet', 'font', 'script', 'other'].includes(req.resourceType())) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+
+        await page.evaluate(async () => {
+            await new Promise((resolve) => {
+                let lastHeight = 0;
+                let scrolls = 0;
+                const maxScrolls = 25;
+                const scrollInterval = setInterval(() => {
+                    const scrollHeight = document.body.scrollHeight;
+                    window.scrollTo(0, scrollHeight);
+                    const newHeight = document.body.scrollHeight;
+                    if (newHeight === lastHeight || scrolls >= maxScrolls) {
+                        clearInterval(scrollInterval);
+                        resolve();
+                    } else {
+                        lastHeight = newHeight;
+                        scrolls++;
+                    }
+                }, 2000);
+            });
+        });
+
+        return await page.evaluate(() => {
+            const images = Array.from(document.querySelectorAll('img'));
+            const uniqueUrls = new Set();
+            for (const img of images) {
+                if (img.naturalWidth > 100 && img.naturalHeight > 100) {
+                    uniqueUrls.add(img.src);
+                }
+            }
+            return Array.from(uniqueUrls);
+        });
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
+    }
+};
+
+
 // --- Endpoints da API ---
 app.get('/api/sources', async (req, res) => {
     await db.read();
@@ -93,86 +155,24 @@ app.get('/api/download', async (req, res) => {
         res.status(500).json({ message: 'Não foi possível baixar a imagem.' });
     }
 });
-
-
 app.post('/api/images/scrape', async (req, res) => {
     const { url } = req.body;
     if (!url) {
         return res.status(400).json({ message: 'URL é obrigatória.' });
     }
-
     if (cache.has(url) && (Date.now() - cache.get(url).timestamp < CACHE_DURATION_MS)) {
         console.log(`A devolver resultados do cache para a URL: ${url}`);
         return res.status(200).json(cache.get(url).data);
     }
-
     console.log(`POST /api/images/scrape -> Cache inválido. A iniciar busca real na URL: ${url}`);
-
-    let browser = null;
     try {
-        browser = await puppeteer.launch({
-            args: chromium.args,
-            defaultViewport: chromium.defaultViewport,
-            executablePath: await chromium.executablePath(),
-            headless: chromium.headless,
-            ignoreHTTPSErrors: true,
-        });
-
-        const page = await browser.newPage();
-        
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            if (['stylesheet', 'font', 'script', 'other'].includes(req.resourceType())) {
-                req.abort();
-            } else {
-                req.continue();
-            }
-        });
-
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
-
-        // MELHORIA DEFINITIVA: Lógica de scroll infinito robusta
-        await page.evaluate(async () => {
-            await new Promise((resolve) => {
-                let lastHeight = 0;
-                let scrolls = 0;
-                const maxScrolls = 25; // Limite para evitar loops infinitos em sites muito grandes
-                const scrollInterval = setInterval(() => {
-                    const scrollHeight = document.body.scrollHeight;
-                    window.scrollTo(0, scrollHeight);
-                    const newHeight = document.body.scrollHeight;
-
-                    // Se a altura não mudou depois de rolar, consideramos que chegámos ao fim
-                    if (newHeight === lastHeight || scrolls >= maxScrolls) {
-                        clearInterval(scrollInterval);
-                        resolve();
-                    } else {
-                        lastHeight = newHeight;
-                        scrolls++;
-                    }
-                }, 2000); // Espera 2 segundos entre cada scroll
-            });
-        });
-
-        const imageUrls = await page.evaluate(() => {
-            const images = Array.from(document.querySelectorAll('img'));
-            const uniqueUrls = new Set();
-            for (const img of images) {
-                if (img.naturalWidth > 100 && img.naturalHeight > 100) {
-                    uniqueUrls.add(img.src);
-                }
-            }
-            return Array.from(uniqueUrls);
-        });
-
+        const imageUrls = await scrapeUrl(url);
         if (imageUrls.length === 0) {
            return res.status(404).json({ message: 'Nenhuma imagem de alta qualidade encontrada nesta URL.' });
         }
-
         await db.read();
         const newSource = { id: crypto.randomUUID(), url: url, name: new URL(url).hostname };
         db.data.sources.push(newSource);
-
         const newImages = imageUrls.map((imageUrl, i) => ({
             id: `scrape_${Date.now()}_${i}`,
             src: imageUrl,
@@ -181,24 +181,57 @@ app.post('/api/images/scrape', async (req, res) => {
             author: 'WebScraper',
             sourceId: newSource.id
         }));
+        db.data.images.unshift(...newImages);
+        await db.write();
+        const responseData = { newSource, newImages };
+        cache.set(url, { data: responseData, timestamp: Date.now() });
+        res.status(201).json(responseData);
+    } catch (error) {
+        console.error("Erro durante o web scraping:", error);
+        res.status(500).json({ message: 'Ocorreu um erro ao tentar buscar imagens da URL.' });
+    }
+});
+
+// NOVO ENDPOINT DE SINCRONIZAÇÃO
+app.post('/api/sources/:id/sync', async (req, res) => {
+    const { id } = req.params;
+    await db.read();
+    const source = db.data.sources.find(s => s.id === id);
+    if (!source) {
+        return res.status(404).json({ message: 'Fonte não encontrada.' });
+    }
+
+    console.log(`POST /api/sources/${id}/sync -> A sincronizar a fonte: ${source.url}`);
+    try {
+        const imageUrls = await scrapeUrl(source.url);
+        
+        const existingImageUrls = new Set(db.data.images.filter(img => img.sourceId === id).map(img => img.src));
+        const newImageUrls = imageUrls.filter(url => !existingImageUrls.has(url));
+
+        console.log(`Encontradas ${newImageUrls.length} novas imagens.`);
+        if (newImageUrls.length === 0) {
+            return res.status(200).json({ newImages: [] }); // Responde com sucesso, mas sem novas imagens
+        }
+
+        const newImages = newImageUrls.map((imageUrl, i) => ({
+            id: `sync_${Date.now()}_${i}`,
+            src: imageUrl,
+            alt: `Imagem de ${source.name}`,
+            source: source.name,
+            author: 'WebScraper',
+            sourceId: source.id
+        }));
 
         db.data.images.unshift(...newImages);
         await db.write();
 
-        const responseData = { newSource, newImages };
-        cache.set(url, { data: responseData, timestamp: Date.now() });
-
-        res.status(201).json(responseData);
-
+        res.status(201).json({ newImages });
     } catch (error) {
-        console.error("Erro durante o web scraping:", error);
-        res.status(500).json({ message: 'Ocorreu um erro ao tentar buscar imagens da URL. O site pode estar protegido ou demorou demasiado tempo a responder.' });
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
+        console.error("Erro durante a sincronização:", error);
+        res.status(500).json({ message: 'Ocorreu um erro ao tentar sincronizar a fonte.' });
     }
 });
+
 
 // Inicia o servidor
 app.listen(PORT, async () => {
