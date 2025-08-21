@@ -27,7 +27,7 @@ app.use(express.json());
 const cache = new Map();
 const CACHE_DURATION_MS = 15 * 60 * 1000;
 
-// --- Função Helper para Scraping (para evitar repetição de código) ---
+// --- Função Helper para Scraping ---
 const scrapeUrl = async (url) => {
     let browser = null;
     try {
@@ -94,30 +94,50 @@ app.get('/api/sources', async (req, res) => {
     await db.read();
     res.json(db.data.sources);
 });
+
+// LÓGICA DE PROTEÇÃO DE FAVORITOS ESTÁ AQUI
 app.delete('/api/sources/:id', async (req, res) => {
     const { id } = req.params;
     await db.read();
+
     const sourceToRemove = db.data.sources.find(s => s.id === id);
     if (!sourceToRemove) {
         return res.status(404).json({ message: 'Fonte não encontrada.' });
     }
+
+    // 1. Remove a fonte da lista de fontes
     db.data.sources = db.data.sources.filter(source => source.id !== id);
+
+    // 2. Processa as imagens: mantém as favoritas e remove as outras
     const favoriteSet = new Set(db.data.favorites);
     const updatedImages = [];
+
     for (const image of db.data.images) {
         if (image.sourceId === id) {
+            // Se a imagem pertence à fonte removida, verifica se é favorita
             if (favoriteSet.has(image.id)) {
-                updatedImages.push({ ...image, sourceId: null, source: `(Arquivado) ${image.source}` });
+                // Se for favorita, mantém a imagem mas atualiza-a para a desvincular
+                updatedImages.push({
+                    ...image,
+                    sourceId: null, // Desvincula da fonte
+                    source: `(Arquivado) ${image.source}` // Indica que a fonte foi removida
+                });
             }
+            // Se não for favorita, ela é simplesmente ignorada (removida)
         } else {
+            // Se a imagem não pertence à fonte removida, mantém-na como está
             updatedImages.push(image);
         }
     }
     db.data.images = updatedImages;
-    await db.write();
+    
+    await db.write(); // Guarda as alterações no ficheiro
+
     if (sourceToRemove.url) cache.delete(sourceToRemove.url);
+
     res.status(200).json({ success: true, message: 'Fonte removida. Imagens favoritas foram mantidas.' });
 });
+
 app.get('/api/images', async (req, res) => {
     await db.read();
     const { images, favorites } = db.data;
@@ -191,8 +211,6 @@ app.post('/api/images/scrape', async (req, res) => {
         res.status(500).json({ message: 'Ocorreu um erro ao tentar buscar imagens da URL.' });
     }
 });
-
-// NOVO ENDPOINT DE SINCRONIZAÇÃO
 app.post('/api/sources/:id/sync', async (req, res) => {
     const { id } = req.params;
     await db.read();
@@ -200,19 +218,15 @@ app.post('/api/sources/:id/sync', async (req, res) => {
     if (!source) {
         return res.status(404).json({ message: 'Fonte não encontrada.' });
     }
-
     console.log(`POST /api/sources/${id}/sync -> A sincronizar a fonte: ${source.url}`);
     try {
         const imageUrls = await scrapeUrl(source.url);
-        
         const existingImageUrls = new Set(db.data.images.filter(img => img.sourceId === id).map(img => img.src));
         const newImageUrls = imageUrls.filter(url => !existingImageUrls.has(url));
-
         console.log(`Encontradas ${newImageUrls.length} novas imagens.`);
         if (newImageUrls.length === 0) {
-            return res.status(200).json({ newImages: [] }); // Responde com sucesso, mas sem novas imagens
+            return res.status(200).json({ newImages: [] });
         }
-
         const newImages = newImageUrls.map((imageUrl, i) => ({
             id: `sync_${Date.now()}_${i}`,
             src: imageUrl,
@@ -221,17 +235,14 @@ app.post('/api/sources/:id/sync', async (req, res) => {
             author: 'WebScraper',
             sourceId: source.id
         }));
-
         db.data.images.unshift(...newImages);
         await db.write();
-
         res.status(201).json({ newImages });
     } catch (error) {
         console.error("Erro durante a sincronização:", error);
         res.status(500).json({ message: 'Ocorreu um erro ao tentar sincronizar a fonte.' });
     }
 });
-
 
 // Inicia o servidor
 app.listen(PORT, async () => {
