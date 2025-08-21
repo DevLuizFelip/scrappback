@@ -8,14 +8,17 @@ const { Low } = require('lowdb');
 const { JSONFile } = require('lowdb/node');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 // --- Configuração da Base de Dados Persistente (lowdb) ---
 const file = join(__dirname, 'db.json');
 const adapter = new JSONFile(file);
 const db = new Low(adapter, { sources: [], images: [], favorites: [] }); // Dados padrão
 
-app.use(cors());
+const corsOptions = {
+  origin: 'https://seu-frontend-url.vercel.app' // O URL que a Vercel lhe deu!
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // --- Cache em Memória (continua a ser útil para performance) ---
